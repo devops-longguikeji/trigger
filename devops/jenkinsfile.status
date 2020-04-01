@@ -1,0 +1,86 @@
+pipeline {
+    agent any
+
+    // global properties
+    // - PYPI_REGISTRY
+
+    environment {
+        GIT_SHORT_COMMIT = """${sh(
+            returnStdout: true,
+            script: 'git rev-parse --short HEAD',
+        ).trim()}"""
+        DOCKER_IMAGE_BUILD_VERSION = "build-${env.BUILD_NUMBER}-${env.GIT_SHORT_COMMIT}"
+        DOCKER_IMAGE_DEV_VERSION = "dev-${env.BUILD_NUMBER}-${env.GIT_SHORT_COMMIT}"
+    }
+    stages {
+        stage('pre'){
+            steps{
+                replacePyPIRegistry()
+            }
+        }
+        stage('ci'){
+            steps{
+                ci()
+            }
+        }
+    }
+    post {
+        always {
+            updateGithubCommitStatus()
+        }
+    }
+}
+
+def replacePyPIRegistry(){
+    hostname = sh (
+        returnStdout: true,
+        script: "python -c \"from urlparse import urlparse;print urlparse('${env.PYPI_REGISTRY}').hostname\" ",
+    ).trim()
+    sh """
+    cat > devops/pip.conf << EOF
+[global]
+index-url = ${env.PYPI_REGISTRY}
+trusted-host = ${hostname}
+EOF
+    """
+}
+
+def ci() {
+    echo 1
+}
+
+
+def getRepoURL() {
+    sh "git config --get remote.origin.url > .git/remote-url"
+    return readFile(".git/remote-url").trim()
+}
+ 
+def getCommitSha() {
+    sh "git rev-parse HEAD > .git/current-commit"
+    return readFile(".git/current-commit").trim()
+}
+
+def getCommitStatus() {
+    return readFile(".git/status-content").trim()
+}
+ 
+def updateGithubCommitStatus() {
+    repoUrl = getRepoURL()
+    commitSha = getCommitSha()
+    message = getCommitStatus()
+
+    step([
+        $class: 'GitHubCommitStatusSetter',
+        reposSource: [$class: "ManuallyEnteredRepositorySource", url: repoUrl],
+        commitShaSource: [$class: "ManuallyEnteredShaSource", sha: commitSha],
+        errorHandlers: [[$class: 'ShallowAnyErrorHandler']],
+        statusResultSource: [
+            $class: 'ConditionalStatusResultSource',
+            results: [
+                [$class: 'BetterThanOrEqualBuildResult', result: 'SUCCESS', state: 'SUCCESS', message: message],
+                [$class: 'BetterThanOrEqualBuildResult', result: 'FAILURE', state: 'FAILURE', message: message],
+                [$class: 'AnyBuildResult', state: 'FAILURE', message: 'Loophole']
+            ]
+        ]
+    ])
+}
